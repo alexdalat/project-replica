@@ -1,0 +1,7 @@
+data_*
+data/
+llama.cpp/
+logs/
+models/
+.vscode/
+__pycache__/

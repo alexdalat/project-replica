@@ -26,5 +26,5 @@ python3 messages/export_imessages.py data_$1
 python3 messages/to_final_file.py data_$1
 
 echo -e "When you're ready, run \n\n\
-python3 finetune.py data_$1/final.jsonl models/$1/imsg_\$(date +'%Y-%m-%d_%H-%M')/\n\n\
+python3 finetune.py data_$1/final.jsonl models/$1/imsg_\$(date +'%Y-%m-%d_%H-%M')/ --dataset_limit=500 --epochs=1 --batch_size=1\n\n\
 to start the fine-tuning process."

@@ -143,7 +143,7 @@ def main(args):
         # )
 
         # defualt if none provided
-        base_model_id = "alpindale/Mistral-7B-v0.2-hf"
+        base_model_id = "mistralai/Mistral-7B-Instruct-v0.3"
         print(f"No base_model_id provided, using default: {base_model_id}")
 
     # ---- model + tokenizer (QLoRA 4-bit) ----

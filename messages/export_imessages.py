@@ -157,11 +157,7 @@ def decode_attributed_body(data: Optional[bytes]) -> Optional[str]:
     return None
 
 
-def write_or_merge(out_file: Path, new_lines: List[str]) -> None:
-    """
-    If out_file exists and the first line matches new_lines[0], merge (dedupe, keep order).
-    Otherwise, write to a unique filename (… (2).txt).
-    """
+def write_to_file(out_file: Path, new_lines: List[str]) -> None:
     if not new_lines:
         return
     if out_file.exists():
@@ -169,7 +165,7 @@ def write_or_merge(out_file: Path, new_lines: List[str]) -> None:
         return
     with out_file.open("w", encoding="utf-8") as f:
         f.write("\n".join(new_lines) + "\n")
-    print(f"Wrote  {len(new_lines):>5} lines -> {out_file}")
+    print(f"Wrote {len(new_lines):>5} lines -> {out_file}")
 
 
 # --- Database query functions ---
@@ -476,7 +472,7 @@ def main():
             )
 
             if lines:
-                write_or_merge(out_file, lines)
+                write_to_file(out_file, lines)
             else:
                 print(f"Skipped (no text messages): {base_name}")
 
@@ -496,7 +492,7 @@ def main():
             )
 
             if lines:
-                write_or_merge(out_file, lines)
+                write_to_file(out_file, lines)
             else:
                 print(f"Skipped (no text messages): {group_base}")
 

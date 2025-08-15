@@ -5,3 +5,6 @@ logs/
 models/
 .vscode/
 __pycache__/
+.env
+mlruns/
+wandb/

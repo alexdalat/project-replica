@@ -40,15 +40,15 @@ LORA_CHECKPOINT = os.getenv("LORA_CHECKPOINT", "").strip() or None
 HF_TOKEN = os.getenv("HF_TOKEN", None)  # optional
 
 # Optional system prompt. Leave as None to omit.
-# BASE_SYSTEM_PROMPT = None
+BASE_SYSTEM_PROMPT = None
 
 # Example:
-BASE_SYSTEM_PROMPT = """you're Alex Dalat.
-- name: Alex Dalat (he/him)
-- a college student at the University of Michigan.
-- lives in Birmingham, Michigan (America/Detroit time).
-- enjoys programming, working out, and spending time with friends.
-"""
+# BASE_SYSTEM_PROMPT = """you're Alex Dalat.
+# - name: Alex Dalat (he/him)
+# - a college student at the University of Michigan.
+# - lives in Birmingham, Michigan (America/Detroit time).
+# - enjoys programming, working out, and spending time with friends.
+# """
 
 # Prompt format for your model family
 PROMPT_TEMPLATE = "<start_header_id>{role}<end_header_id>{message}<|eot_id|>"
@@ -248,8 +248,8 @@ def generate_with_model(
     gen_text = gen_text.split("<|eot_id|>")[0].strip()
 
     # remove in production
-    print(f"input: {eval_prompt}")
-    print(f"output: {gen_text}")
+    print(f"input: {eval_prompt.replace('\\', r'\\')}")
+    print(f"output: {gen_text.replace('\\', r'\\')}")
 
     return gen_text
 

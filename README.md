@@ -28,7 +28,7 @@ cp ~/Library/Messages/chat.db data_$USER/chat.db  # or copy these over manually
 cp ~/Library/Application\ Support/AddressBook/Sources/ data_$USER/
 chmod +x export_imessages.sh
 ./export_imessages.sh data_$USER
-python3 finetune.py data_$USER/final.jsonl models/$USER/imsg_$(date +'%Y-%m-%d_%H-%M') --dataset_limit=500 --epochs=1 --batch_size=1
+python3 finetune.py data_$USER/final.jsonl models/$USER --dataset_limit=500 --epochs=1 --batch_size=1
 ```
 then run `export_lora.py models/$USER/imsg_{DATETIME}` to export the fine-tuned model, ready for Ollama.
 

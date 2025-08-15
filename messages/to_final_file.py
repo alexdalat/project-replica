@@ -191,6 +191,7 @@ def chunk_msgs_by_tokens(msg_strs, tokenizer, max_tokens: int):
 def rows_to_conversations(
     df: pd.DataFrame,
     tokenizer: AutoTokenizer,
+    should_collapse_same_sender: bool,
     chat_owner: str,
     role_for_others: str,
     use_time_gaps: bool,
@@ -204,7 +205,8 @@ def rows_to_conversations(
         return []
 
     # Merge consecutive messages by the same sender within threshold
-    df = collapse_same_sender(df, delta_threshold=SAME_USER_THRESHOLD_SECONDS)
+    if should_collapse_same_sender:
+        df = collapse_same_sender(df, delta_threshold=SAME_USER_THRESHOLD_SECONDS)
 
     # Map to roles
     df["role"] = df["username"].apply(lambda u: "assistant" if u == chat_owner else role_for_others)
@@ -250,6 +252,7 @@ def rows_to_conversations(
 def process_thread_file(
     txt_path: Path,
     tokenizer: AutoTokenizer,
+    should_collapse_same_sender: bool,
     chat_owner: str = "Me",
     role_for_others: str = "user",
 ) -> list[str]:
@@ -273,7 +276,7 @@ def process_thread_file(
     for block in thread_blocks:
         outputs.extend(
             rows_to_conversations(
-                block, tokenizer, chat_owner, role_for_others, use_time_gaps=False
+                block, tokenizer, should_collapse_same_sender, chat_owner, role_for_others, use_time_gaps=False
             )
         )
 
@@ -281,7 +284,7 @@ def process_thread_file(
     if not normal_df.empty:
         outputs.extend(
             rows_to_conversations(
-                normal_df, tokenizer, chat_owner, role_for_others, use_time_gaps=True
+                normal_df, tokenizer, should_collapse_same_sender, chat_owner, role_for_others, use_time_gaps=True
             )
         )
 
@@ -293,6 +296,7 @@ def process_thread_file(
 def run_all(
     input_dir: Path,
     output_jsonl: Path,
+    should_collapse_same_sender: bool,
     chat_owner_name: str,
     others_role: str = "user",
     debug: bool = False,
@@ -312,7 +316,7 @@ def run_all(
     total_written = 0
     with output_jsonl.open("w", encoding="utf-8") as f_out:
         for fp in tqdm(txt_files, desc="Processing threads"):
-            queries = process_thread_file(fp, tokenizer, chat_owner=chat_owner_name, role_for_others=others_role)
+            queries = process_thread_file(fp, tokenizer, should_collapse_same_sender, chat_owner=chat_owner_name, role_for_others=others_role)
             for q in queries:
                 f_out.write(json.dumps({"input": q}, ensure_ascii=False) + "\n")
                 total_written += 1
@@ -326,6 +330,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Convert iMessage txt files directly into a single JSONL (threads become their own conversations).")
     parser.add_argument("data_dir", type=str, help="Directory containing 'imessages/' and where final.jsonl will be written.")
+    parser.add_argument("--collapse_same_sender", action="store_true", help="Collapse consecutive messages from the same sender within SAME_USER_THRESHOLD_SECONDS.")
     parser.add_argument("--name", type=str, default="Me", help='Label used for your own messages (mapped to role="assistant"). Default: "Me"')
     parser.add_argument("--role", type=str, default="user", help='Role for non-owner speakers (default: "user").')
     parser.add_argument("--output", type=str, default="final.jsonl", help='Output JSONL filename (default: final.jsonl).')
@@ -336,7 +341,7 @@ def main():
     input_dir = data_dir / "imessages"
     output_path = data_dir / args.output
 
-    run_all(input_dir=input_dir, output_jsonl=output_path, chat_owner_name=args.name, others_role=args.role, debug=args.debug)
+    run_all(input_dir=input_dir, output_jsonl=output_path, should_collapse_same_sender=args.collapse_same_sender, chat_owner_name=args.name, others_role=args.role, debug=args.debug)
 
 if __name__ == "__main__":
     main()

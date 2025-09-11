@@ -30,7 +30,8 @@ chmod +x export_imessages.sh
 ./export_imessages.sh data_$USER
 python3 finetune.py data_$USER/final.jsonl models/$USER --dataset_limit=500 --epochs=1 --batch_size=1
 ```
-then run `export_lora.py models/$USER/imsg_{DATETIME}` to export the fine-tuned model, ready for Ollama.
+`LORA_WEIGHTS=models/dad/imsg_2025-08-15_14-37/ uvicorn inference:app --host=0.0.0.0 --reload` to start the inference server, which will be available at `http://localhost:8000`.
+or run `export_lora.py models/$USER/imsg_{DATETIME}` to export the fine-tuned model, ready for Ollama.
 
 ### Outputs
  - `models/` - folder with newly created fine-tuned models

@@ -112,7 +112,7 @@ def main():
     ap.add_argument("data_dir", type=Path, help="Folder containing adapter_config.json and adapter_model/")
     ap.add_argument("--llamacpp", type=Path, default=Path("./llama.cpp/"), help="Path to llama.cpp source folder (built)")
     ap.add_argument("--quant", default="q4_0", help="Quantization preset (e.g., q4_0, q5_0)")
-    ap.add_argument("--convert-only", action="store_true", help="Stop after converting base + LoRA to GGUF")
+    ap.add_argument("--full-export", action="store_true", help="Perform full export including base conversion, merging, and quantization")
     args = ap.parse_args()
 
     data_dir = args.data_dir.resolve()
@@ -141,14 +141,6 @@ def main():
     merged_f16_path = outdir / f"merged-{data_dir_name_part}-f16.gguf"
     final_quant_path = outdir / f"merged-{data_dir_name_part}-{args.quant}.gguf"
 
-    # 1) Convert HF base to GGUF (F16)
-    run([
-        "python3",
-        str(llamacpp / "convert_hf_to_gguf.py"),
-        "--outfile", str(base_f16_path),
-        str(base_dir),
-    ])
-
     # 2) Convert LoRA to FP16 GGUF
     run([
         "python3",
@@ -159,9 +151,17 @@ def main():
         str(data_dir),
     ])
 
-    if args.convert_only:
-        print("[done] Converted base + LoRA to GGUF. Skipping merge/quant due to --convert-only.")
+    if not args.full_export:
+        print("[done] Converted LoRA to GGUF. Skipping merge/quant. Add --full-export to continue.")
         return
+    
+		# 1) Convert HF base to GGUF (F16)
+    run([
+        "python3",
+        str(llamacpp / "convert_hf_to_gguf.py"),
+        "--outfile", str(base_f16_path),
+        str(base_dir),
+    ])
 
     # 3) Merge LoRA into FP16 base
     run([

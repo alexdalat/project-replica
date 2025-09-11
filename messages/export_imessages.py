@@ -387,30 +387,11 @@ def build_lines_for_chat(
     lines: List[str] = []
     seen_reply_guids: set = set()
 
-    top_level_guids = {m["guid"] for m in top_level}
-
     for m in top_level:
         lines.append(_format_line(m["dt"], m["sender"], m["msg"], indent_level=0))
         for r in replies_by_origin.get(m["guid"], []):
             lines.append(_format_line(r["dt"], r["sender"], r["msg"], indent_level=1))
             seen_reply_guids.add(r["guid"])
-
-		# Orphan replies usually happens for long chats that were split, but oh well, we just ignore them
-    # # 5) Orphan replies (origin not present among top-level)
-    # orphan_groups = [(origin, lst) for origin, lst in replies_by_origin.items()
-    #                  if origin not in top_level_guids]
-    # if orphan_groups:
-    #     # Keep relative time order of groups by first reply
-    #     orphan_groups.sort(key=lambda p: (p[1][0]["dt"], p[1][0]["rowid"]))
-    #     for origin, lst in orphan_groups:
-    #         # Stub header so the reader knows why these are grouped here
-    #         # Uses time of the first orphan reply for position within the file (end section here).
-    #         lines.append(f"[replies to missing message {origin}]")
-    #         for r in lst:
-    #             if r["guid"] in seen_reply_guids:
-    #                 continue
-    #             lines.append(_format_line(r["dt"], r["sender"], r["msg"], indent_level=1))
-    #             seen_reply_guids.add(r["guid"])
 
     return lines
 
@@ -449,7 +430,7 @@ def main():
     contacts = load_contacts(contacts_path)
 
     out_dir = data_path / "imessages"
-    out_dir.mkdir(parents=True, exist_ok=True)  # allow overwrite
+    out_dir.mkdir(parents=True, exist_ok=False)
 
     conn = sqlite3.connect(db_path, uri=True)
     conn.row_factory = sqlite3.Row

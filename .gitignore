@@ -4,7 +4,18 @@ llama.cpp/
 logs/
 models/
 .vscode/
-__pycache__/
 .env
 mlruns/
 wandb/
+.ruff_cache/
+cache/
+
+# Google
+token*.json
+credentials.json
+
+
+# Python
+.venv/
+.python-version
+__pycache__/

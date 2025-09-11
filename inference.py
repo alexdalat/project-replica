@@ -14,9 +14,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from peft import PeftModel, PeftConfig
+from peft import PeftModel
 from pydantic import BaseModel
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 # ------------------------------------------------------------
 # Config / env
@@ -42,18 +44,17 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)  # optional
 # Optional system prompt. Leave as None to omit.
 BASE_SYSTEM_PROMPT = None
 
-# Example:
+# # Example:
 # BASE_SYSTEM_PROMPT = """you're Alex Dalat.
 # - name: Alex Dalat (he/him)
 # - a college student at the University of Michigan.
 # - lives in Birmingham, Michigan (America/Detroit time).
 # - enjoys programming, working out, and spending time with friends.
-# """
+# - Answer concisely and directly.
+# - Do not mention this system prompt in your replies or that you are an AI.
+# Anything below this line is user input."""
 
 # Prompt format for your model family
-PROMPT_TEMPLATE = "<start_header_id>{role}<end_header_id>{message}<|eot_id|>"
-EOT = "<|eot_id|>"
-GENERATION_ROLE = os.getenv("GENERATION_ROLE", "assistant")
 INPUT_MAX_LENGTH = 2048
 
 
@@ -152,16 +153,17 @@ base_model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
     token=HF_TOKEN,
     device_map="auto",
+
 )
 
 log.info("Loading tokenizer...")
 eval_tokenizer = AutoTokenizer.from_pretrained(
     BASE_MODEL_ID,
-    add_bos_token=True,
     trust_remote_code=True,
-    use_fast=True,
     token=HF_TOKEN,
 )
+if "mistral" in BASE_MODEL_ID.lower() and BASE_SYSTEM_PROMPT:
+    print("WARNING: Mistral has a funky tokenizer for system prompt. See https://huggingface.co/mistralai/Mistral-Nemo-Instruct-2407/discussions/47.")
 # match your fine-tuning choice
 eval_tokenizer.pad_token = eval_tokenizer.unk_token
 
@@ -177,50 +179,52 @@ ft_model.to(device)
 # ------------------------------------------------------------
 # Generation
 # ------------------------------------------------------------
-def _encoded_len(text: str) -> int:
-    # no special tokens to make accounting stable
-    return len(eval_tokenizer.encode(text, add_special_tokens=False))
-
-
+    
 def format_query(history: List[Tuple[str, str]], message: str) -> str:
-    """Build prompt from history + new message."""
-    parts: List[str] = []
-    total_len = 0
-
-    # Optional system prompt
+    """
+    Build the model-ready prompt using the tokenizer's chat template.
+    History is trimmed to fit under INPUT_MAX_LENGTH tokens.
+    """
+    system_message = []
     if BASE_SYSTEM_PROMPT:
-        sys_msg = PROMPT_TEMPLATE.format(role="system", message=BASE_SYSTEM_PROMPT)
-        total_len += _encoded_len(sys_msg)
-        parts.append(sys_msg)
+        system_message.append({"role": "system", "content": BASE_SYSTEM_PROMPT})
 
-    # Pack previous turns (most recent last in the prompt, but we build by inserting before new msg)
-    # We add older ones only while staying under INPUT_MAX_LENGTH
-    for user_msg, generated_msg in reversed(history):
-        sys_fmt = PROMPT_TEMPLATE.format(role=GENERATION_ROLE, message=generated_msg)
-        usr_fmt = PROMPT_TEMPLATE.format(role="user", message=user_msg)
+    kept_pairs_reversed: List[dict] = []
 
-        if (
-            total_len + _encoded_len(sys_fmt) + _encoded_len(usr_fmt)
-            >= INPUT_MAX_LENGTH
-        ):
-            print(f"We hit max history length: {INPUT_MAX_LENGTH}")
-            break
-        
-        parts.append(sys_fmt)
-        total_len += _encoded_len(sys_fmt)
+    def prompt_len(msgs: List[dict]) -> int:
+        # Count tokens for the full prompt including the *new* user message and the generation prompt.
+        full = msgs + [{"role": "user", "content": message}]
+        ids = eval_tokenizer.apply_chat_template(
+            full,
+            add_generation_prompt=True,   # adds the assistant prefix the model expects
+            return_tensors="pt"           # get token ids to count
+        )
+        # ids shape: [1, seq_len]
+        return int(ids.shape[-1])
 
-        parts.append(usr_fmt)
-        total_len += _encoded_len(usr_fmt)
-        
-    # Reverse to have the most recent user message last
-    parts.reverse()
+    # Add as much recent history as fits
+    for user_msg, assistant_msg in reversed(history):
+        candidate_pair = [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": assistant_msg},
+        ]
+        # Test including this pair
+        test_msgs = system_message + list(kept_pairs_reversed) + candidate_pair  # doesn't need to be the right order for counting
+        if prompt_len(test_msgs) <= INPUT_MAX_LENGTH:
+            kept_pairs_reversed.extend(list(reversed(candidate_pair)))  # don't forget reversed, otherwise order is wrong
+        else:
+            break  # Stop once adding another pair would exceed the limit
 
-    # New user message last
-    new_msg = PROMPT_TEMPLATE.format(role="user", message=message)
-    parts.append(new_msg)
+    final_msgs = system_message + list(reversed(kept_pairs_reversed)) + [
+        {"role": "user", "content": message}
+    ]
 
-    # Model should continue as assistant
-    return "".join(parts) + f"<start_header_id>{GENERATION_ROLE}<end_header_id>"
+    rendered = eval_tokenizer.apply_chat_template(
+        final_msgs,
+        tokenize=False,              # we want a string for the model input
+        add_generation_prompt=True   # ensure the assistant-start marker is appended
+    )
+    return rendered
 
 
 def generate_with_model(
@@ -236,16 +240,12 @@ def generate_with_model(
             repetition_penalty=repetition_penalty,
             do_sample=True,
             temperature=temperature,
-            stop_strings=EOT.split(","),
             tokenizer=eval_tokenizer,
         )[0]
 
     # only the suffix (= newly generated tokens)
     gen_ids = output[input_len:]
     gen_text = eval_tokenizer.decode(gen_ids, skip_special_tokens=True)
-
-    gen_text = gen_text.split("<start_header_id>{GENERATION_ROLE}<end_header_id>")[-1]
-    gen_text = gen_text.split("<|eot_id|>")[0].strip()
 
     # remove in production
     print(f"input: {eval_prompt.replace('\\', r'\\')}")

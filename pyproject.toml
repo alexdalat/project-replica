@@ -1,0 +1,30 @@
+[project]
+name = "imsg-llm"
+version = "0.1.0"
+description = "Local iMessage finetuning + inference toolkit (LoRA/QLoRA)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Alex" }]
+license = "MIT"
+
+dependencies = [
+    "bitsandbytes>=0.47.0",
+    "datasets>=4.0.0",
+    "dotenv>=0.9.9",
+    "fastapi>=0.116.1",
+    "ftfy>=6.3.1",
+    "google-api-python-client>=2.179.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.2",
+    "mistral-common>=1.8.3",
+    "pandas>=2.3.1",
+    "peft>=0.17.0",
+    "protobuf>=6.32.0",
+    "pytypedstream>=0.1.0",
+    "sentencepiece>=0.2.1",
+    "torch>=2.8.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.55.2",
+    "uvicorn>=0.35.0",
+    "wandb>=0.21.1",
+]

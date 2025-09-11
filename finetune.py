@@ -7,11 +7,13 @@ import os
 import re
 from pathlib import Path
 from typing import Optional
+from random import Random
 
 from datetime import datetime
+from datasets import load_dataset, Dataset
 import torch
+
 os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
-from datasets import load_dataset
 from dotenv import load_dotenv
 from peft import (
     LoraConfig,
@@ -28,6 +30,7 @@ from transformers import (
     TrainingArguments,
     DataCollatorForLanguageModeling,
 )
+
 # Optional FSDP bits
 from accelerate import FullyShardedDataParallelPlugin, Accelerator
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
@@ -37,6 +40,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
 
 try:
     import wandb
+
     use_wandb = True
 except ImportError:
     use_wandb = False
@@ -74,7 +78,9 @@ def _find_checkpoint_dir(root: Path, requested: Optional[str]) -> Path:
             return cand.resolve()
         raise FileNotFoundError(f"Requested checkpoint path not found: {requested}")
 
-    if (root / "adapter_model.safetensors").exists() and (root / "adapter_config.json").exists():
+    if (root / "adapter_model.safetensors").exists() and (
+        root / "adapter_config.json"
+    ).exists():
         return root
 
     candidates = []
@@ -107,7 +113,74 @@ def print_trainable_parameters(model):
         if p.requires_grad:
             trainable += n
     pct = 100 * trainable / total if total else 0
-    print(f"trainable params: {trainable} || all params: {total} || trainable%: {pct:.4f}")
+    print(
+        f"trainable params: {trainable} || all params: {total} || trainable%: {pct:.4f}"
+    )
+
+
+def add_len_column(ds):
+    return ds.map(lambda x: {"_len": len(x["input_ids"])}, desc="Computing lengths")
+
+
+def select_by_token_budget(ds, budget: int, seed: int = 42, desc: str = ""):
+    # Shuffle deterministically, then take examples until we hit the budget
+    ds = ds.shuffle(seed=seed)
+    lengths = ds["_len"]
+    selected_idx = []
+    total = 0
+    for i, L in enumerate(lengths):
+        if total + L > budget:
+            break
+        selected_idx.append(i)
+        total += L
+    selected = ds.select(selected_idx)
+    print(
+        f"[{desc}] kept {len(selected)} examples, {total:,} tokens (budget={budget:,})."
+    )
+    return selected, total
+
+def _apply_template_and_tokenize(example, tokenizer, args):
+    """
+    Convert [{"user": "...", "message": "..."}...] -> chat template text,
+    then tokenize to get input_ids + attention_mask.
+
+    Using apply_chat_template is required; we use tokenize=False first to get the
+    formatted string, then call tokenizer(...) for masks/truncation control.
+    """
+    msgs = [
+        {"role": m["user"], "content": m["message"]} for m in example["messages"]
+    ]
+    templated = tokenizer.apply_chat_template(
+        msgs,
+        tokenize=False,
+        add_generation_prompt=False,  # SFT: no extra assistant turn
+    )
+    return tokenizer(
+        templated,
+        truncation=True,
+        max_length=args.max_length,
+        padding=False,  # let your DataCollator handle padding
+    )
+
+def _load_conversations_as_dataset(path: str) -> Dataset:
+    """
+    File format:
+      [
+        [ {"user":"user","message":"...","date":"..."}, {"user":"assistant","message":"...","date":"..."}, ... ],
+        ...
+      ]
+    We store each conversation under a single 'messages' column.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("Expected top-level JSON array of conversations.")
+    samples = [
+        {"messages": conv}
+        for conv in data
+        if isinstance(conv, list) and len(conv) > 0
+    ]
+    return Dataset.from_list(samples)
 
 
 # ------------------------- core -------------------------
@@ -121,28 +194,6 @@ def main(args):
     if not args.use_bf16 and not args.use_fp16:
         args.use_bf16 = True
 
-    # ---------- dataset ----------
-    train_dataset = load_dataset("json", data_files=str(args.train_dataset_path), split="train")
-    eval_dataset = (
-        load_dataset("json", data_files=str(args.eval_dataset_path), split="train")
-        if args.eval_dataset_path
-        else None
-    )
-
-    if args.dataset_limit is not None:
-        limit = min(args.dataset_limit, len(train_dataset))
-        train_dataset = train_dataset.shuffle(seed=42).select(range(limit))
-        if eval_dataset is not None:
-            elimit = min(args.dataset_limit, len(eval_dataset))
-            eval_dataset = eval_dataset.shuffle(seed=42).select(range(elimit))
-
-    # If no eval provided, carve out a small validation split
-    if eval_dataset is None:
-        split = train_dataset.train_test_split(test_size=0.05, seed=42)
-        train_dataset, eval_dataset = split["train"], split["test"]
-        print(f"No eval dataset provided, carving out 5% validation split from train dataset. New sizes: "
-              f"train={len(train_dataset)}, eval={len(eval_dataset)}")
-
     # ---------- figure out base model + (optional) init LoRA ----------
     hf_token = os.getenv("HF_TOKEN", None)
 
@@ -150,7 +201,9 @@ def main(args):
     init_lora_dir = None
 
     if args.init_lora_dir:
-        init_lora_dir = _find_checkpoint_dir(Path(args.init_lora_dir), args.lora_checkpoint)
+        init_lora_dir = _find_checkpoint_dir(
+            Path(args.init_lora_dir), args.lora_checkpoint
+        )
         base_model_id = base_model_id or _read_base_model_id(init_lora_dir)
 
     if not base_model_id:
@@ -175,33 +228,140 @@ def main(args):
         device_map="auto",
         token=hf_token,
     )
+    model.gradient_checkpointing_enable()
+    model = prepare_model_for_kbit_training(model)
 
     tokenizer = AutoTokenizer.from_pretrained(
         base_model_id,
         padding_side="left",
-        add_eos_token=True,
-        add_bos_token=True,
+        add_eos_token=True,  # end of sentence token
+        add_bos_token=True,  # beginning of sentence token
         token=hf_token,
     )
-    # Use EOS as pad; collator will mask pads out of loss
     tokenizer.pad_token = tokenizer.eos_token
 
-    def tokenize_row(example):
-        # Let the DataCollator create labels and ignore pads; no fixed-length padding here
-        return tokenizer(
-            example["input"],
-            truncation=True,
-            max_length=args.max_length,
-            #padding="max_length",
+    # ---------- datasets + tokenization ----------
+    if args.train_dataset_path is None:
+        raise ValueError("train_dataset_path must be provided.")
+    if not args.train_dataset_path.exists():
+        raise FileNotFoundError(f"Train dataset not found: {args.train_dataset_path}")
+    if args.train_dataset_path.suffix not in (".json", ".jsonl"):
+        raise ValueError(
+            f"Unsupported train dataset format: {args.train_dataset_path.suffix}. "
+            "Expected .json or .jsonl."
+        )
+    
+    if args.train_dataset_path.suffix == ".json":  # assume it's conversation style
+        train_dataset = _load_conversations_as_dataset(str(args.train_dataset_path))
+        eval_dataset = (
+            _load_conversations_as_dataset(str(args.eval_dataset_path))
+            if args.eval_dataset_path
+            else None
         )
 
-    tokenized_train = train_dataset.map(tokenize_row)
-    tokenized_eval = eval_dataset.map(tokenize_row)
+        # If no eval provided, carve out a small validation split
+        if eval_dataset is None:
+            split = train_dataset.train_test_split(test_size=args.eval_fraction, seed=42)
+            train_dataset, eval_dataset = split["train"], split["test"]
+            print(
+                f"No eval dataset provided, carving out {args.eval_fraction*100}% validation split from train dataset. "
+                f"New sizes: train={len(train_dataset)}, eval={len(eval_dataset)}"
+            )
 
-    model.gradient_checkpointing_enable()
-    model = prepare_model_for_kbit_training(model)
+        tokenized_train = train_dataset.map(
+            _apply_template_and_tokenize, fn_kwargs={"tokenizer": tokenizer, "args": args}
+        )
+        tokenized_eval = eval_dataset.map(
+            _apply_template_and_tokenize, fn_kwargs={"tokenizer": tokenizer, "args": args}
+        )
+    else:  # assume it's a single-column JSONL with "input" key
+        train_dataset = load_dataset(
+            "json",
+            data_files=str(args.train_dataset_path),
+            split="train",
+            cache_dir="./cache",
+        )
+
+        eval_dataset = (
+            load_dataset(
+                "json",
+                data_files=str(args.eval_dataset_path),
+                split="train",
+                cache_dir="./cache",
+            )
+            if args.eval_dataset_path
+            else None
+        )
+        if eval_dataset is None:
+            split = train_dataset.train_test_split(test_size=args.eval_fraction, seed=42)
+            train_dataset, eval_dataset = split["train"], split["test"]
+            print(
+                f"No eval dataset provided, carving out {args.eval_fraction*100}% validation split from train dataset. "
+                f"New sizes: train={len(train_dataset)}, eval={len(eval_dataset)}"
+            )
+        
+        tokenized_train = train_dataset.map(
+            lambda x: tokenizer(
+                x["input"],
+                truncation=True,
+                max_length=args.max_length,
+                padding=False,  # let your DataCollator handle padding
+            ),
+            desc="Tokenizing train dataset",
+        )
+        tokenized_eval = eval_dataset.map(
+            lambda x: tokenizer(
+                x["input"],
+                truncation=True,
+                max_length=args.max_length,
+                padding=False,  # let your DataCollator handle padding
+            ),
+            desc="Tokenizing eval dataset",
+        )
+
+    # lengths
+    tokenized_train = add_len_column(tokenized_train)
+    tokenized_eval = add_len_column(tokenized_eval)
+
+    # Optional: cap by token budget
+    if args.token_budget is not None:
+        if args.eval_dataset_path is None:
+            eval_budget = max(1, int(args.token_budget * args.eval_fraction))
+            train_budget = max(1, args.token_budget - eval_budget)
+        else:
+            eval_budget = max(1, int(args.token_budget * 0.1))
+            train_budget = max(1, args.token_budget - eval_budget)
+
+        tokenized_train, train_tokens = select_by_token_budget(
+            tokenized_train, train_budget, args.seed, "train"
+        )
+        tokenized_eval, eval_tokens = select_by_token_budget(
+            tokenized_eval, eval_budget, args.seed, "eval"
+        )
+        print(
+            f"Combined token budget used: {train_tokens + eval_tokens:,} (train={train_tokens:,}, eval={eval_tokens:,})"
+        )
+    else:
+        train_tokens = sum(tokenized_train["_len"])
+        eval_tokens = sum(tokenized_eval["_len"])
+        print(
+            f"Token counts — train: {train_tokens:,}, eval: {eval_tokens:,}, total: {train_tokens + eval_tokens:,}"
+        )
+
+    # Preview a few examples
+    i = 0
+    if args.train_dataset_path.suffix == ".json":  # conversation style
+        msgs = [{"role": m["user"], "content": m["message"]} for m in train_dataset[i]["messages"]]
+        templated = tokenizer.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=False
+        )
+    else:  # single-column JSONL
+        templated = train_dataset[i]["input"]
+    #tokenized = tokenized_train[i]["input_ids"]
+    print(f"\n--- Preview of example #{i} ---\n{templated}")#\n{tokenized}")
 
     # ---------- LoRA: either resume existing adapter or create new one ----------
+
     if init_lora_dir:
         model = PeftModel.from_pretrained(model, str(init_lora_dir))
         print("Loaded existing LoRA from:", init_lora_dir)
@@ -225,8 +385,12 @@ def main(args):
     # (Optional) FSDP wrapping
     if args.fsdp:
         fsdp_plugin = FullyShardedDataParallelPlugin(
-            state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
-            optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=False),
+            state_dict_config=FullStateDictConfig(
+                offload_to_cpu=True, rank0_only=False
+            ),
+            optim_state_dict_config=FullOptimStateDictConfig(
+                offload_to_cpu=True, rank0_only=False
+            ),
         )
         accelerator = Accelerator(fsdp_plugin=fsdp_plugin)
         model = accelerator.prepare_model(model)
@@ -236,9 +400,12 @@ def main(args):
     eval_steps = args.eval_steps
     eval_batch_size = args.batch_size
 
-    # Output dir. ex with default output_dir: models/$USER/imsg_08-09-25_18-07
-    # imsg is hardcoded for now, but will be changed later when more datasets are supported
-    outdir = args.output_dir / f"imsg_{datetime.now().strftime('%Y-%m-%d_%H-%M')}"
+    # Output dir. ex with default output_dir: models/$USER/{dataset_type}_08-09-25_18-07
+    # extract dataset type from train_dataset_path, e.g., "final_imsg.jsonl" -> "imsg", "final_gdoc.jsonl" -> "gdoc"
+    dataset_type = args.train_dataset_path.stem.split("_")[-1]
+    outdir = (
+        args.output_dir / f"{dataset_type}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}"
+    )
 
     training_args = TrainingArguments(
         output_dir=outdir,
@@ -262,12 +429,14 @@ def main(args):
         metric_for_best_model="eval_loss",
         save_total_limit=4,
         group_by_length=True,
-        report_to="all",
+        report_to="all",  # all
         run_name=f"{str(outdir).replace('/', '_')}",
+        eval_on_start=True
     )
-    
+
     es_callback = EarlyStoppingCallback(early_stopping_patience=2)
 
+    print("Starting training...")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -283,21 +452,57 @@ def main(args):
     tokenizer.save_pretrained(training_args.output_dir)
 
 
-
 if __name__ == "__main__":
     import argparse
 
-    p = argparse.ArgumentParser(description="Finetune a model with LoRA (QLoRA, 4-bit).")
+    p = argparse.ArgumentParser(
+        description="Finetune a model with LoRA (QLoRA, 4-bit)."
+    )
 
     # data
-    p.add_argument("train_dataset_path", type=Path, default=Path("data_" + os.getenv("USER", "unknown")), help="Path to training dataset JSON (Default: 'data_$USER/').")
-    p.add_argument("output_dir", type=Path, default=Path("models") / os.getenv("USER", "unknown"), help="Where to save LoRA checkpoints/adapters (Default: 'models/$USER/').")
-    p.add_argument("--eval_dataset_path", type=Path, default=None, help="Optional eval/val dataset JSON.")
-    p.add_argument("--dataset_limit", type=int, default=None, help="Limit number of examples for quick runs.")
-    p.add_argument("--max_length", type=int, default=2048)
+    p.add_argument(
+        "train_dataset_path",
+        type=Path,
+        default=Path("data_" + os.getenv("USER", "unknown")) / "final_imsg.jsonl",
+        help="Path to training dataset JSON (Default: 'data_$USER/final_imsg.jsonl').",
+    )
+    p.add_argument(
+        "output_dir",
+        type=Path,
+        default=Path("models") / os.getenv("USER", "unknown"),
+        help="Where to save LoRA checkpoints/adapters (Default: 'models/$USER/').",
+    )
+    p.add_argument(
+        "--eval_dataset_path",
+        type=Path,
+        default=None,
+        help="Optional eval/val dataset JSON.",
+    )
+    p.add_argument(
+        "--max_length",
+        type=int,
+        default=2048,
+        help="Maximum sequence length for training (Default: 2048).",
+    )
+
+    p.add_argument(
+        "--token_budget",
+        type=int,
+        default=None,
+        help="Total tokens to use across train+eval.",
+    )
+    p.add_argument(
+        "--eval_fraction",
+        type=float,
+        default=0.05,
+        help="If no eval set is provided, fraction of budget for eval.",
+    )
+    p.add_argument("--seed", type=int, default=42)
 
     # model selection
-    p.add_argument("--base_model_id", type=str, default=None, help="HF model id or local path.")
+    p.add_argument(
+        "--base_model_id", type=str, default=None, help="HF model id or local path."
+    )
     p.add_argument(
         "--init-lora-dir",
         type=str,
@@ -314,9 +519,18 @@ if __name__ == "__main__":
     # LoRA hyperparams (used only when NOT resuming an existing adapter)
     # for r and alpha: https://datascience.stackexchange.com/questions/123229/understanding-alpha-parameter-tuning-in-lora-paper
     p.add_argument("--lora_r", type=int, default=16, help="LoRA rank (r)")
-    p.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha (α), weights scaling factor") 
+    p.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=16,
+        help="LoRA alpha (α), weights scaling factor",
+    )
     p.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout rate")
-    p.add_argument("--big_lora", action="store_true", help="Use bigger LoRA with additional modules.")
+    p.add_argument(
+        "--big_lora",
+        action="store_true",
+        help="Use bigger LoRA with additional modules.",
+    )
 
     # training
     p.add_argument("--batch_size", type=int, default=1)
@@ -325,12 +539,24 @@ if __name__ == "__main__":
     p.add_argument("--learning_rate", type=float, default=2.5e-5)
     p.add_argument("--warmup_steps", type=int, default=1)
     p.add_argument("--logging_steps", type=int, default=10, help="Log every N steps.")
-    p.add_argument("--logging_dir", type=str, default="./logs", help="Directory for training logs (tensorboard).")
-    p.add_argument("--save_strategy", type=str, default="steps", choices=["epoch", "steps"])
+    p.add_argument(
+        "--logging_dir",
+        type=str,
+        default="./logs",
+        help="Directory for training logs (tensorboard).",
+    )
+    p.add_argument(
+        "--save_strategy", type=str, default="steps", choices=["epoch", "steps"]
+    )
     p.add_argument("--save_steps", type=int, default=10)
-    
+
     # evaluation
-    p.add_argument("--evaluation_strategy", type=str, default="steps", choices=["no", "steps", "epoch"])
+    p.add_argument(
+        "--evaluation_strategy",
+        type=str,
+        default="steps",
+        choices=["no", "steps", "epoch"],
+    )
     p.add_argument("--eval_steps", type=int, default=10)
 
     # precision
@@ -338,10 +564,17 @@ if __name__ == "__main__":
     p.add_argument("--use_fp16", action="store_true")
 
     # resume
-    p.add_argument("--resume_from_checkpoint", type=str, default=None, help="Trainer checkpoint directory to resume.")
+    p.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Trainer checkpoint directory to resume.",
+    )
 
     # optional FSDP
-    p.add_argument("--fsdp", type=bool, default=True, help="Wrap model with FSDP via Accelerate.")
+    p.add_argument(
+        "--fsdp", type=bool, default=True, help="Wrap model with FSDP via Accelerate."
+    )
 
     args = p.parse_args()
     main(args)

@@ -25,7 +25,7 @@ git clone https://github.com/alexdalat/project-replica
 cd project-replica
 pip install -r requirements.txt
 cp ~/Library/Messages/chat.db data_$USER/chat.db  # or copy these over manually
-cp -r ~/Library/Application\ Support/AddressBook/Sources/ data_$USER/
+cp -r ~/Library/Application\ Support/AddressBook/ data_$USER/
 chmod +x export_imessages.sh
 ./export_imessages.sh data_$USER
 python3 finetune.py data_$USER/final.jsonl models/$USER --dataset_limit=500 --epochs=1 --batch_size=1

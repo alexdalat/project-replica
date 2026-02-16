@@ -9,6 +9,8 @@ This project is designed to fine-tune a language model to mimic your own writing
 		- [Outputs](#outputs)
 	- [References](#references)
 
+![](https://github.com/alexdalat/project-replica/blob/main/images/mistral_vs_alexgmail_vs_alexgpt.png?raw=true)
+
 ## Installation
 
 ### Requirements

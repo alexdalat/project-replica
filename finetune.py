@@ -40,10 +40,20 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
 
 try:
     import wandb
-
-    use_wandb = True
+    # Test if wandb can actually connect
+    try:
+        wandb.init(mode="disabled")  # Test connection without actually logging
+        wandb.finish()
+        use_wandb = True
+        print("✓ wandb connection successful")
+    except Exception as e:
+        use_wandb = False
+        print(f"⚠ wandb available but can't connect: {e}")
+        print("  → Falling back to tensorboard logging only")
 except ImportError:
     use_wandb = False
+    print("⚠ wandb not installed")
+    print("  → Falling back to tensorboard logging only")
 
 load_dotenv()
 
@@ -407,12 +417,18 @@ def main(args):
         args.output_dir / f"{dataset_type}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}"
     )
 
+    # Determine logging backends based on wandb availability
+    report_to = ["tensorboard"]
+    if use_wandb:
+        report_to.append("wandb")
+
     training_args = TrainingArguments(
         output_dir=outdir,
         warmup_steps=args.warmup_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
         bf16=args.use_bf16,
@@ -429,9 +445,11 @@ def main(args):
         metric_for_best_model="eval_loss",
         save_total_limit=4,
         group_by_length=True,
-        report_to="all",  # all
+        report_to=report_to,
         run_name=f"{str(outdir).replace('/', '_')}",
-        eval_on_start=True
+        eval_on_start=True,
+        max_grad_norm=0.3,
+        eval_accumulation_steps=1,
     )
 
     es_callback = EarlyStoppingCallback(early_stopping_patience=2)
@@ -481,8 +499,8 @@ if __name__ == "__main__":
     p.add_argument(
         "--max_length",
         type=int,
-        default=2048,
-        help="Maximum sequence length for training (Default: 2048).",
+        default=1024,
+        help="Maximum sequence length for training (Default: 1024).",
     )
 
     p.add_argument(
@@ -535,7 +553,7 @@ if __name__ == "__main__":
     # training
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--epochs", type=int, default=1)
-    p.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=16)
     p.add_argument("--learning_rate", type=float, default=2.5e-5)
     p.add_argument("--warmup_steps", type=int, default=1)
     p.add_argument("--logging_steps", type=int, default=10, help="Log every N steps.")

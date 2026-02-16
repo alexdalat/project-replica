@@ -99,21 +99,39 @@ def sanitize_export(text: str) -> str:
     return text
 
 
-# later replace this bafoonery with proper sign in on website and automatic token retrieval
 def build_drive_service() -> "googleapiclient.discovery.Resource":
+    """Build and return the Google Drive API service with authentication."""
     creds = None
     token_path = "token.json"
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    # Refresh or get new token
+    
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(host="127.0.0.1", port=53682, open_browser=False, prompt="consent")
+            #creds = flow.run_local_server(host="127.0.0.1", port=53682, open_browser=False, prompt="consent")
+            # Use out-of-band flow for remote/Tailscale setups (no callback server needed)
+            flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+            auth_url, _ = flow.authorization_url(prompt="consent")
+            
+            print("\n" + "="*70)
+            print("AUTHENTICATION REQUIRED")
+            print("="*70)
+            print("\n1. Open this URL in your browser:\n")
+            print(f"   {auth_url}\n")
+            print("2. Authorize the application")
+            print("3. Copy the authorization code from the browser\n")
+            print("="*70)
+            
+            code = input("Enter the authorization code: ").strip()
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            
         with open(token_path, "w", encoding="utf-8") as token:
             token.write(creds.to_json())
+    
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 

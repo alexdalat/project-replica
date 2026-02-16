@@ -28,3 +28,5 @@ python3 messages/to_final_file.py $1
 echo -e "When you're ready, run \n\n\
 python3 finetune.py $1/final.jsonl models/\$USER --dataset_limit=500 --epochs=1 --batch_size=1\n\n\
 to start the fine-tuning process."
+echo -e "\nAfter fine-tuning, you can export to Ollama with:\n"
+echo -e "./ollama_export.sh models/\$USER/imsg_YYYY-MM-DD_HH-MM\n"
